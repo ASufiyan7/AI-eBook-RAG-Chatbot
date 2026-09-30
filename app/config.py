@@ -12,7 +12,7 @@ INDEX_NAME = "agentic-ai-ebook"
 
 EMBED_MODEL = "gemini-embedding-001"
 EMBED_DIM = 768
-LLM_MODEL = "gemini-2.5-flash"
+LLM_MODEL = "gemini-3.5-flash"
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
