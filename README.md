@@ -1,106 +1,159 @@
 # Agentic AI eBook RAG Chatbot
 
-A Retrieval-Augmented Generation chatbot that answers questions **strictly from the [Agentic AI eBook](https://konverge.ai/pdf/Ebook-Agentic-AI.pdf)**. Built with LangGraph, Pinecone, Gemini, FastAPI, and a Streamlit UI.
+A grounded Q&A chatbot built on the free [Agentic AI eBook](https://konverge.ai/pdf/Ebook-Agentic-AI.pdf) by Konverge.AI.
 
-Every response returns the final answer, the retrieved context chunks (with page numbers and similarity scores), and a confidence score. Questions the eBook cannot answer are refused instead of guessed.
+The main focus here is **strict grounding**:
+- If the question is covered in the book, it answers with page-level citations (e.g., `Page 11`).
+- If the question is outside the book or irrelevant, it refuses to answer instead of hallucinating.
 
-## Architecture
+Built with **LangGraph**, **Pinecone**, **Google Gemini**, **FastAPI**, and a **Streamlit** frontend.
 
-```
-                  ┌─────────────── Ingestion (one-time) ───────────────┐
-                  │ PDF → extract text per page → chunk (800/150) →    │
-                  │ Gemini embeddings → Pinecone (text + page metadata)│
-                  └────────────────────────────────────────────────────┘
+---
 
-Streamlit UI ─▶ FastAPI /chat ─▶ LangGraph
- (or any client)                    │
-                               [retrieve]  embed question, top-5 chunks from Pinecone
-                                    │
-                                 (guard)   top score ≥ MIN_SCORE ?
-                                  │     │
-                                yes     no
-                                  │     │
-                            [generate] [refuse]   "Not found in the eBook"
-                         Gemini, context-only
-                                  │
-                                  ▼
-                  { answer, confidence, contexts[] }
-```
-
-**Components**
-
-| Component | Choice | Why |
-|---|---|---|
-| Orchestration | LangGraph | Explicit graph with a conditional edge for the grounding guard |
-| Vector DB | Pinecone (serverless, free tier) | Managed, cosine similarity, metadata storage |
-| Embeddings | `gemini-embedding-001` (768 dims) | Free tier; separate task types for documents and queries |
-| LLM | `gemini-2.5-flash` (temperature 0) | Free tier, fast, deterministic |
-| API | FastAPI | Typed responses, auto-generated Swagger UI at `/docs` |
-| UI | Streamlit | Chat interface that calls the API; shows confidence and retrieved chunks |
-
-**How answers stay grounded**
-
-1. **Retrieval guard:** if the best chunk's similarity score is below `MIN_SCORE`, the LLM is never called and the bot replies that the answer isn't in the eBook.
-2. **Prompt constraint:** the LLM is told to use only the supplied context and to reply with a fixed "not found" message otherwise. It cites pages, e.g. `(Page 4)`.
-3. **Temperature 0:** keeps output deterministic and close to the source text.
-
-**Confidence score:** the cosine similarity of the top retrieved chunk (0 to 1). The same value drives the guard.
-
-**Design notes**
-
-- Chunking is done per page, so every chunk keeps an accurate page number for citations.
-- Chunk IDs are deterministic (`p{page}-c{index}`), so re-running ingestion overwrites rather than duplicates.
-- The Streamlit UI is a thin client over the API, so there is a single source of truth for the RAG logic.
-
-## Project structure
+## What's Inside
 
 ```
 rag-chatbot/
 ├── app/
-│   ├── config.py          # env vars and tunables (chunk size, top-k, threshold)
-│   ├── vectorstore.py     # embeddings + Pinecone init / upsert / query
-│   ├── ingest.py          # PDF → chunks → embeddings → Pinecone
-│   ├── graph.py           # LangGraph: retrieve → guard → generate / refuse
-│   └── main.py            # FastAPI app (/chat, /health)
+│   ├── config.py          # Settings: chunk size, similarity threshold, model names
+│   ├── ingest.py          # Downloads the PDF, chunks by page, embeds, and uploads to Pinecone
+│   ├── vectorstore.py     # Pinecone setup, Gemini embeddings + auto-retry on rate limits
+│   ├── graph.py           # LangGraph flow: retrieve → guardrail check → generate / refuse
+│   └── main.py            # FastAPI backend with /chat and /health endpoints
 ├── frontend/
-│   └── streamlit_app.py   # Streamlit chat UI (calls the API)
+│   └── streamlit_app.py   # Web UI showing chat, confidence bar, and retrieved source chunks
 ├── scripts/
-│   └── run_samples.py     # runs sample queries, writes SAMPLE_QUERIES.md
-├── .env.example
+│   └── run_samples.py     # Test script to run benchmark questions and export results
+├── SAMPLE_QUERIES.md      # Output log from running sample queries
+├── .env.example           # API key template
 ├── requirements.txt
 └── README.md
 ```
 
-## Setup
+---
 
-**Prerequisites:** Python 3.10+, a free [Google AI Studio](https://aistudio.google.com) API key, and a free [Pinecone](https://app.pinecone.io) API key.
+## How It Works
+
+Most RAG bots dump whatever context they find straight into an LLM and hope for the best. Here, we add an explicit guardrail step before generation:
+
+1. **Ingest (One-time):**
+   - The 60-page PDF is downloaded and split page-by-page into 137 overlapping chunks (800 chars, 150 overlap).
+   - Each chunk gets embedded with `gemini-embedding-001` (768 dimensions) and stored in Pinecone with metadata (`page` and `text`).
+   - Chunks use deterministic IDs (`p{page}-c{index}`), so re-running ingestion updates existing vectors instead of duplicating them.
+
+2. **Retrieve:**
+   - The user's question is embedded and Pinecone returns the top 5 most similar chunks by cosine score.
+
+3. **Guardrail Check:**
+   - We check the top chunk's similarity score against `MIN_SCORE` (`0.55`).
+   - If the score is below `0.55`, the query is flagged as out-of-scope. The LLM is never called, saving time and API tokens. It immediately returns:  
+     `"I couldn't find this in the Agentic AI eBook."`
+
+4. **Generate:**
+   - If the score passes, the chunks are passed to `gemini-3.5-flash` at `temperature=0` with a strict system prompt telling it to answer only from the provided text and include page citations.
+
+---
+
+## Quickstart
+
+### 1. Requirements
+
+- Python 3.10 or higher
+- A free [Google AI Studio API key](https://aistudio.google.com/)
+- A free [Pinecone API key](https://app.pinecone.io/)
+
+### 2. Install
 
 ```bash
 git clone <your-repo-url>
 cd rag-chatbot
 
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+# Set up virtual environment
+python -m venv .venv
 
-cp .env.example .env            # then add GOOGLE_API_KEY and PINECONE_API_KEY
+# Activate on Windows:
+.venv\Scripts\activate
+# Or on macOS / Linux:
+# source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
-**1. Ingest the PDF (once)**
+### 3. Set API Keys
+
+Copy the example file:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your keys:
+
+```env
+GOOGLE_API_KEY="your-google-api-key-here"
+PINECONE_API_KEY="your-pinecone-api-key-here"
+```
+
+### 4. Ingest the eBook (Run Once)
 
 ```bash
 python -m app.ingest
 ```
 
-This downloads the eBook, chunks it, embeds the chunks, and stores them in Pinecone. The index is created automatically.
+This pulls the PDF from the web, processes all 60 pages into 137 chunks, and uploads them to Pinecone. The index (`agentic-ai-ebook`) is created automatically if it doesn't already exist.
 
-**2. Start the API**
+> **Note:** The script includes automatic retry logic with backoff, so it gracefully pauses and resumes if you hit the Google free-tier per-minute embedding limit.
+
+### 5. Run the Backend API
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/docs> to try the chatbot from the Swagger UI, or use curl:
+The API will be live at `http://127.0.0.1:8000`. You can test endpoints via the built-in Swagger UI at `http://127.0.0.1:8000/docs`.
+
+### 6. Run the Frontend (Streamlit)
+
+In a separate terminal (with `.venv` activated and inside the `rag-chatbot` directory):
+
+```bash
+streamlit run frontend/streamlit_app.py
+```
+
+Open `http://localhost:8501` in your browser. You get an interactive chat interface that displays:
+- The generated answer with page numbers.
+- A confidence bar (top similarity score).
+- An expandable section showing the exact source text and page numbers pulled from the eBook.
+
+---
+
+## Example Queries & Behavior
+
+Here is how the bot handles in-scope vs. out-of-scope questions:
+
+### In-scope Question
+> **User:** What are the key components of an agentic AI system?  
+> **Confidence:** `0.81`  
+> **Bot:** *Perception, Reasoning, Planning, Learning, and Execution (Page 17).*
+
+### Out-of-scope Question
+> **User:** Who won the 2023 Cricket World Cup?  
+> **Confidence:** `0.49` *(below 0.55 cutoff)*  
+> **Bot:** *I couldn't find this in the Agentic AI eBook.*
+
+You can run the full test suite anytime with:
+
+```bash
+python -m scripts.run_samples
+```
+
+Results are saved to [`SAMPLE_QUERIES.md`](SAMPLE_QUERIES.md).
+
+---
+
+## API Reference
+
+### `POST /chat`
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
@@ -108,75 +161,40 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"question": "What is agentic AI?"}'
 ```
 
-**3. (Optional) Start the Streamlit UI**
-
-With the API running, in a second terminal:
-
-```bash
-streamlit run frontend/streamlit_app.py
-```
-
-Opens at <http://localhost:8501> with a chat interface showing the answer, a confidence bar, and the retrieved chunks. To point the UI at a different API address, set the `API_URL` environment variable (default: `http://127.0.0.1:8000/chat`).
-
-## API
-
-**`POST /chat`**
-
-Request:
-
-```json
-{ "question": "What is agentic AI?" }
-```
-
-Response:
+**Response:**
 
 ```json
 {
-  "answer": "...",
-  "confidence": 0.0,
+  "answer": "Based on the provided context, Agentic AI is an autonomous system that creates impact by learning continuously, focusing on goals, and acting independently...",
+  "confidence": 0.78,
   "contexts": [
-    { "text": "...", "page": 0, "score": 0.0 }
+    {
+      "text": "Agentic AI goes beyond other AI systems...",
+      "page": 11,
+      "score": 0.78
+    }
   ]
 }
 ```
 
-- `answer`: grounded answer with page citations, or a "not found" message.
-- `confidence`: similarity of the best retrieved chunk (0 to 1).
-- `contexts`: the top-5 retrieved chunks with page number and score.
+### `GET /health`
 
-**`GET /health`** returns `{"status": "ok"}`.
+Health check endpoint. Returns `{"status": "ok"}`.
 
-## Sample queries
-
-Run all of them with:
-
-```bash
-python -m scripts.run_samples
-```
-
-Results are written to [`SAMPLE_QUERIES.md`](SAMPLE_QUERIES.md).
-
-1. What is agentic AI?
-2. How does agentic AI differ from traditional AI or generative AI?
-3. What are the key components of an agentic AI system?
-4. What are the main business benefits of agentic AI?
-5. What challenges or risks are associated with agentic AI?
-6. Who won the 2018 FIFA World Cup? *(out of scope, expected to be refused)*
+---
 
 ## Configuration
 
-All tunables live in `app/config.py`:
+Everything configurable is kept in [`app/config.py`](app/config.py):
 
-| Setting | Default | Meaning |
+| Variable | Default | Purpose |
 |---|---|---|
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 800 / 150 | Characters per chunk / overlap between chunks |
-| `TOP_K` | 5 | Chunks retrieved per question |
-| `MIN_SCORE` | 0.55 | Minimum top similarity to attempt an answer |
+| `EMBED_MODEL` | `gemini-embedding-001` | Google embedding model name |
+| `EMBED_DIM` | `768` | Vector dimension size |
+| `LLM_MODEL` | `gemini-3.5-flash` | LLM used for generation |
+| `CHUNK_SIZE` | `800` | Target characters per chunk |
+| `CHUNK_OVERLAP`| `150` | Character overlap between consecutive chunks |
+| `TOP_K` | `5` | Number of chunks retrieved from Pinecone |
+| `MIN_SCORE` | `0.55` | Similarity threshold for the guardrail node |
 
-If valid questions get refused, lower `MIN_SCORE`. If off-topic questions get answered, raise it.
-
-## Limitations
-
-- Text-only extraction: tables and images in the PDF are not interpreted.
-- Single-turn: each question is answered independently, with no chat memory (the UI shows history, but the backend does not use it).
-- Confidence is a retrieval-similarity signal, not a guarantee of answer correctness.
+If you find relevant questions being refused, lower `MIN_SCORE` to `0.50`. If off-topic queries sneak through, bump it to `0.60`.

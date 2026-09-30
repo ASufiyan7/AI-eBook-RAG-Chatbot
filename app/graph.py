@@ -40,14 +40,22 @@ def refuse(state: State):
 
 def generate(state: State):
     context = "\n\n".join(f"[Page {c['page']}] {c['text']}" for c in state["chunks"])
-    res = _llm.models.generate_content(
-        model=config.LLM_MODEL,
-        contents=f"Context:\n{context}\n\nQuestion: {state['question']}",
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT, temperature=0
-        ),
-    )
-    return {"answer": res.text.strip()}
+    prompt = f"Context:\n{context}\n\nQuestion: {state['question']}"
+    for attempt in range(4):
+        try:
+            res = _llm.models.generate_content(
+                model=config.LLM_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT, temperature=0
+                ),
+            )
+            return {"answer": res.text.strip()}
+        except Exception as e:
+            if attempt == 3:
+                raise
+            import time
+            time.sleep(2 * (attempt + 1))
 
 
 builder = StateGraph(State)
